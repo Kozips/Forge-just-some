@@ -178,5 +178,5 @@ forge-just-some/
 
 ## License
 
-[BSD 3-Clause License](LICENSE)
+[MIT License](LICENSE)
 
