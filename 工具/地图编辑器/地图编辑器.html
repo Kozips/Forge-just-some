@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>地图编辑器</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; font-family: "Microsoft YaHei", sans-serif; padding: 15px; user-select: none; color: #eee; }
+  h1 { text-align: center; color: #e0e0e0; margin-bottom: 3px; font-size: 24px; }
+  .subtitle { text-align: center; color: #666; margin-bottom: 12px; font-size: 12px; }
+  .tabs { width: 920px; margin: 0 auto 8px; display: flex; gap: 0; justify-content: center; }
+  .tab-btn {
+    padding: 8px 24px; border: 2px solid #4caf50; background: #222; cursor: pointer;
+    font-size: 13px; font-weight: bold; font-family: inherit; color: #888; transition: all 0.15s;
+  }
+  .tab-btn:first-child { border-radius: 6px 0 0 6px; }
+  .tab-btn:last-child { border-radius: 0 6px 6px 0; }
+  .tab-btn.active { background: #4caf50; color: #fff; }
+  .toolbar {
+    width: 920px; margin: 0 auto 8px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: center;
+  }
+  .toolbar button {
+    padding: 5px 12px; border: 1px solid #555; border-radius: 4px; background: #333;
+    cursor: pointer; font-size: 11px; font-family: inherit; color: #ccc; transition: all 0.1s;
+  }
+  .toolbar button:hover { background: #555; }
+  .toolbar button.active { background: #1976d2; color: #fff; border-color: #1976d2; }
+  .toolbar button.danger { border-color: #c62828; }
+  .toolbar button.danger:hover { background: #c62828; color: #fff; }
+  .toolbar button.success { border-color: #2e7d32; }
+  .toolbar button.success:hover { background: #2e7d32; color: #fff; }
+  .map-container {
+    position: relative; width: 920px; height: 700px; margin: 0 auto;
+    background: #16213e; border: 2px solid #333; border-radius: 8px; overflow: hidden;
+  }
+  .map-container.sub-map { background: #1a1a2e; border-color: #444; }
+  .draggable {
+    position: absolute; cursor: grab; border-radius: 4px; display: flex;
+    align-items: center; justify-content: center; font-size: 11px; font-weight: bold;
+    color: #ddd; text-align: center; line-height: 1.3; transition: box-shadow 0.15s, opacity 0.3s;
+  }
+  .draggable:hover { box-shadow: 0 2px 10px rgba(255,255,255,0.15); z-index: 99; }
+  .draggable.dragging { cursor: grabbing; box-shadow: 0 4px 20px rgba(255,255,255,0.25); z-index: 100; opacity: 0.8; }
+  .draggable.selected { outline: 3px solid #ff9800; outline-offset: 1px; z-index: 98; }
+  .draggable.undiscovered { opacity: 0.25; filter: grayscale(0.8); }
+  .draggable.undiscovered::after {
+    content: '???'; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    font-size: 16px; color: #ff5722; text-shadow: 0 0 8px rgba(255,87,34,0.6); pointer-events: none;
+  }
+  .resize-handle {
+    position: absolute; right: 0; bottom: 0; width: 10px; height: 10px;
+    cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, #666 50%);
+    border-radius: 0 0 3px 0;
+  }
+  .legend { width: 920px; margin: 8px auto; display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  .legend-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #aaa; }
+  .legend-color { width: 14px; height: 14px; border: 2px solid #666; border-radius: 3px; }
+  .info { text-align: center; color: #555; font-size: 11px; margin-top: 6px; }
+  .hidden { display: none !important; }
+  .status-bar {
+    width: 920px; margin: 6px auto; display: flex; justify-content: space-between;
+    font-size: 11px; color: #666; padding: 0 4px;
+  }
+  .fog-toggle { display: flex; align-items: center; gap: 6px; }
+  .fog-toggle input { cursor: pointer; }
+  /* 动态类别样式 - 由JS注入 */
+</style>
+</head>
+<body>
+
+<h1 id="map-title">🗺️ 地图编辑器</h1>
+<p class="subtitle" id="map-subtitle">拖拽移动 · 右下角拖拽改大小 · 双击编辑名称 · Delete删除 · 自动保存</p>
+
+<!-- 标签页 -->
+<div class="tabs" id="tab-bar"></div>
+
+<!-- 工具栏容器 -->
+<div id="toolbar-container"></div>
+
+<!-- 地图容器 -->
+<div id="map-container"></div>
+
+<!-- 状态栏 -->
+<div class="status-bar">
+  <div class="fog-toggle">
+    <input type="checkbox" id="fogToggle" checked onchange="toggleFog()">
+    <label for="fogToggle" style="cursor:pointer;">迷雾模式（未发现地点隐藏）</label>
+  </div>
+  <div id="location-count">已发现：0 / 0</div>
+</div>
+
+<!-- 图例 -->
+<div class="legend" id="legend-bar"></div>
+
+<p class="info" id="info-text">数据自动保存到 localStorage | 支持导出/导入 JSON</p>
+
+<script>
+// ===== 配置数据 =====
+// 从 localStorage 或 URL 参数加载配置
+let CONFIG = null;
+let currentTab = 0;
+let selected = null, dragging = null, resizing = null;
+let startX, startY, origX, origY, origW, origH;
+let fogEnabled = true;
+
+function getConfig() {
+  // 优先从 URL 参数读取
+  const params = new URLSearchParams(location.search);
+  const configKey = params.get('config') || 'map-config';
+  // 从 localStorage 读取
+  const raw = localStorage.getItem(configKey);
+  if (raw) return JSON.parse(raw);
+  // 从 postMessage 或 默认
+  return DEFAULT_CONFIG;
+}
+
+// ===== 默认配置模板 =====
+const DEFAULT_CONFIG = {
+  title: "🗺️ 地图编辑器",
+  subtitle: "拖拽移动 · 双击编辑 · Delete删除",
+  projectKey: "default-map",
+  tabs: [
+    {
+      name: "主地图",
+      id: "main",
+      bgColor: "#16213e",
+      borderColor: "#333",
+      width: 920,
+      height: 700,
+      categories: [
+        { name: "建筑", cls: "building", bg: "#2d4a7a", border: "#4a90d9", icon: "🏠" },
+        { name: "道路", cls: "road", bg: "#333", border: "#555", icon: "" },
+        { name: "水域", cls: "water", bg: "#1a5276", border: "#2e86c1", icon: "💧" },
+        { name: "标注", cls: "label", bg: "transparent", border: "#666", icon: "📍" }
+      ],
+      buildings: []
+    }
+  ],
+  legend: []
+};
+
+// ===== 初始化 =====
+function init() {
+  CONFIG = getConfig();
+  document.getElementById('map-title').textContent = CONFIG.title;
+  document.getElementById('map-subtitle').textContent = CONFIG.subtitle;
+  renderTabs();
+  renderToolbars();
+  renderMaps();
+  renderLegend();
+  loadSavedData();
+  updateCount();
+  // 注入动态样式
+  injectStyles();
+}
+
+function injectStyles() {
+  let css = '';
+  CONFIG.tabs.forEach(tab => {
+    (tab.categories || []).forEach(cat => {
+      css += `.${cat.cls} { background: ${cat.bg}; border: 2px solid ${cat.border}; }\n`;
+    });
+  });
+  const style = document.createElement('style');
+  style.textContent = css;
+  document.head.appendChild(style);
+}
+
+// ===== 标签页 =====
+function renderTabs() {
+  const bar = document.getElementById('tab-bar');
+  bar.innerHTML = '';
+  CONFIG.tabs.forEach((tab, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'tab-btn' + (i === 0 ? ' active' : '');
+    btn.textContent = tab.name;
+    btn.onclick = () => switchTab(i);
+    bar.appendChild(btn);
+  });
+}
+
+function switchTab(index) {
+  currentTab = index;
+  document.querySelectorAll('.tab-btn').forEach((b, i) => b.classList.toggle('active', i === index));
+  document.querySelectorAll('.map-panel').forEach((p, i) => p.classList.toggle('hidden', i !== index));
+  document.querySelectorAll('.toolbar-panel').forEach((p, i) => p.classList.toggle('hidden', i !== index));
+  deselect();
+  updateCount();
+}
+
+// ===== 工具栏 =====
+function renderToolbars() {
+  const container = document.getElementById('toolbar-container');
+  container.innerHTML = '';
+  CONFIG.tabs.forEach((tab, i) => {
+    const div = document.createElement('div');
+    div.className = 'toolbar toolbar-panel' + (i === 0 ? '' : ' hidden');
+    let html = '';
+    (tab.categories || []).forEach(cat => {
+      html += `<button onclick="addBuilding(${i},'${cat.cls}','${cat.icon} 新${cat.name}')">${cat.icon} +${cat.name}</button>`;
+    });
+    html += `<button class="danger" onclick="deleteSelected()">🗑️ 删除</button>`;
+    html += `<button class="success" onclick="discoverSelected()">👁️ 发现</button>`;
+    html += `<button onclick="undiscoverSelected()">❓ 未发现</button>`;
+    html += `<button onclick="exportAll()">📤 导出</button>`;
+    html += `<button onclick="document.getElementById('importFile${i}').click()">📥 导入</button>`;
+    html += `<input type="file" id="importFile${i}" accept=".json" style="display:none" onchange="importAll(event,${i})">`;
+    html += `<button onclick="resetTab(${i})">🔄 重置</button>`;
+    div.innerHTML = html;
+    container.appendChild(div);
+  });
+}
+
+// ===== 地图渲染 =====
+function renderMaps() {
+  const container = document.getElementById('map-container');
+  container.innerHTML = '';
+  CONFIG.tabs.forEach((tab, i) => {
+    const div = document.createElement('div');
+    div.className = 'map-panel map-container' + (i === 0 ? '' : ' hidden sub-map');
+    if (tab.bgColor) div.style.background = tab.bgColor;
+    if (tab.borderColor) div.style.border = `2px solid ${tab.borderColor}`;
+    if (tab.width) div.style.width = tab.width + 'px';
+    if (tab.height) div.style.height = tab.height + 'px';
+    div.id = 'map-' + i;
+    // 绑定事件
+    div.addEventListener('mousedown', e => handleMouseDown(e, i));
+    div.addEventListener('dblclick', e => handleDblClick(e, i));
+    // 渲染建筑
+    (tab.buildings || []).forEach(b => {
+      const el = createBuildingEl(b);
+      div.appendChild(el);
+    });
+    container.appendChild(div);
+  });
+}
+
+function createBuildingEl(b) {
+  const el = document.createElement('div');
+  el.className = 'draggable ' + (b.cls || '') + (b.discovered === false ? ' undiscovered' : '');
+  el.dataset.id = b.id;
+  el.style.cssText = `top:${b.top};left:${b.left};width:${b.width};height:${b.height};`;
+  el.innerHTML = b.html || b.name;
+  el.dataset.discovered = b.discovered === false ? 'false' : 'true';
+  addResizeHandle(el);
+  return el;
+}
+
+function addResizeHandle(el) {
+  if (el.querySelector('.resize-handle')) return;
+  const h = document.createElement('div');
+  h.className = 'resize-handle';
+  el.appendChild(h);
+}
+
+// ===== 图例 =====
+function renderLegend() {
+  const bar = document.getElementById('legend-bar');
+  bar.innerHTML = '';
+  const tab = CONFIG.tabs[currentTab];
+  (tab.categories || []).forEach(cat => {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.innerHTML = `<div class="legend-color" style="background:${cat.bg};border-color:${cat.border};"></div>${cat.icon} ${cat.name}`;
+    bar.appendChild(item);
+  });
+  // 迷雾图例
+  const fogItem = document.createElement('div');
+  fogItem.className = 'legend-item';
+  fogItem.innerHTML = `<div class="legend-color" style="background:#333;border-color:#555;opacity:0.3;"></div>未发现`;
+  bar.appendChild(fogItem);
+}
+
+// ===== 交互 =====
+function handleMouseDown(e, tabIdx) {
+  if (tabIdx !== currentTab) return;
+  const map = document.getElementById('map-' + tabIdx);
+  const el = e.target.closest('.draggable');
+  if (!el) { deselect(); return; }
+  if (e.target.classList.contains('resize-handle')) {
+    resizing = el; origW = el.offsetWidth; origH = el.offsetHeight;
+    startX = e.clientX; startY = e.clientY; e.preventDefault(); return;
+  }
+  select(el); dragging = el; el.classList.add('dragging');
+  startX = e.clientX; startY = e.clientY;
+  origX = el.offsetLeft; origY = el.offsetTop; e.preventDefault();
+}
+
+function handleDblClick(e, tabIdx) {
+  if (tabIdx !== currentTab) return;
+  const map = document.getElementById('map-' + tabIdx);
+  const el = e.target.closest('.draggable');
+  if (!el) return; e.preventDefault(); e.stopPropagation();
+  const oldText = el.innerHTML.replace(/<div class="resize-handle"><\/div>/, '').trim();
+  const input = document.createElement('textarea');
+  input.value = oldText.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '');
+  input.style.cssText = `position:absolute;top:${el.style.top};left:${el.style.left};width:${el.offsetWidth}px;height:${el.offsetHeight}px;font-size:11px;font-weight:bold;text-align:center;border:2px solid #ff9800;border-radius:4px;padding:4px;z-index:200;background:#222;color:#eee;resize:none;font-family:inherit;`;
+  map.appendChild(input); input.focus(); input.select();
+  function finish() {
+    const newText = input.value.trim().replace(/\n/g, '<br>');
+    if (newText) { const h = el.querySelector('.resize-handle'); el.innerHTML = newText; if(h) el.appendChild(h); else addResizeHandle(el); }
+    input.remove(); autoSave();
+  }
+  input.addEventListener('blur', finish);
+  input.addEventListener('keydown', ev => { if(ev.key==='Escape'){input.value=oldText;finish();} if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();finish();} });
+}
+
+document.addEventListener('mousemove', e => {
+  if (dragging) {
+    const map = document.getElementById('map-' + currentTab);
+    const dx = e.clientX - startX, dy = e.clientY - startY;
+    dragging.style.left = Math.max(0, Math.min(origX + dx, map.offsetWidth - dragging.offsetWidth)) + 'px';
+    dragging.style.top = Math.max(0, Math.min(origY + dy, map.offsetHeight - dragging.offsetHeight)) + 'px';
+    dragging.style.right = 'auto'; dragging.style.bottom = 'auto';
+  }
+  if (resizing) {
+    resizing.style.width = Math.max(20, origW + e.clientX - startX) + 'px';
+    resizing.style.height = Math.max(15, origH + e.clientY - startY) + 'px';
+  }
+});
+document.addEventListener('mouseup', () => { if(dragging){dragging.classList.remove('dragging');dragging=null;} if(resizing){resizing=null;} autoSave(); });
+
+function select(el) { deselect(); selected = el; el.classList.add('selected'); }
+function deselect() { if(selected) selected.classList.remove('selected'); selected = null; }
+document.addEventListener('keydown', e => {
+  if ((e.key==='Delete'||e.key==='Backspace') && selected && !document.querySelector('textarea')) {
+    if (confirm('删除 "' + selected.textContent.split('\n')[0] + '" ?')) { selected.remove(); selected = null; autoSave(); updateCount(); }
+  }
+});
+
+// ===== 建筑操作 =====
+let idCounter = 1000;
+function addBuilding(tabIdx, cls, name) {
+  const map = document.getElementById('map-' + tabIdx);
+  const el = document.createElement('div');
+  el.className = 'draggable ' + cls;
+  el.dataset.id = 'b-' + (idCounter++);
+  el.dataset.discovered = 'true';
+  el.style.cssText = 'top:300px;left:400px;width:100px;height:50px;';
+  el.innerHTML = name;
+  map.appendChild(el); select(el); addResizeHandle(el); autoSave(); updateCount();
+}
+
+function deleteSelected() {
+  if (!selected) { alert('先选中一个'); return; }
+  if (confirm('删除?')) { selected.remove(); selected = null; autoSave(); updateCount(); }
+}
+
+function discoverSelected() {
+  if (!selected) { alert('先选中一个'); return; }
+  selected.classList.remove('undiscovered');
+  selected.dataset.discovered = 'true';
+  autoSave(); updateCount();
+}
+
+function undiscoverSelected() {
+  if (!selected) { alert('先选中一个'); return; }
+  selected.classList.add('undiscovered');
+  selected.dataset.discovered = 'false';
+  autoSave(); updateCount();
+}
+
+// ===== 迷雾模式 =====
+function toggleFog() {
+  fogEnabled = document.getElementById('fogToggle').checked;
+  document.querySelectorAll('.draggable.undiscovered').forEach(el => {
+    el.style.display = fogEnabled ? '' : '';
+    el.style.opacity = fogEnabled ? '' : '0.6';
+    if (!fogEnabled) el.classList.remove('undiscovered');
+  });
+  if (fogEnabled) {
+    // 重新应用
+    document.querySelectorAll('.draggable').forEach(el => {
+      if (el.dataset.discovered === 'false') el.classList.add('undiscovered');
+    });
+  }
+  updateCount();
+}
+
+function updateCount() {
+  const map = document.getElementById('map-' + currentTab);
+  if (!map) return;
+  const all = map.querySelectorAll('.draggable').length;
+  const disc = map.querySelectorAll('.draggable[data-discovered="true"]').length;
+  document.getElementById('location-count').textContent = `已发现：${disc} / ${all}`;
+}
+
+// ===== 保存/加载 =====
+function autoSave() {
+  CONFIG.tabs.forEach((tab, i) => {
+    const map = document.getElementById('map-' + i);
+    if (!map) return;
+    tab.buildings = [];
+    map.querySelectorAll('.draggable').forEach(el => {
+      tab.buildings.push({
+        id: el.dataset.id,
+        cls: el.className.replace('draggable','').replace('dragging','').replace('selected','').replace('undiscovered','').trim(),
+        top: el.style.top, left: el.style.left,
+        width: el.style.width, height: el.style.height,
+        html: el.innerHTML,
+        discovered: el.dataset.discovered !== 'false'
+      });
+    });
+  });
+  localStorage.setItem(CONFIG.projectKey, JSON.stringify(CONFIG));
+}
+
+function loadSavedData() {
+  const raw = localStorage.getItem(CONFIG.projectKey);
+  if (!raw) return;
+  try {
+    const saved = JSON.parse(raw);
+    saved.tabs.forEach((tab, i) => {
+      if (!CONFIG.tabs[i]) return;
+      CONFIG.tabs[i].buildings = tab.buildings || [];
+    });
+    // 重新渲染
+    renderMaps();
+  } catch(e) {}
+}
+
+// ===== 导出/导入 =====
+function exportAll() {
+  autoSave();
+  const blob = new Blob([JSON.stringify(CONFIG, null, 2)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (CONFIG.projectKey || 'map') + '.json';
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+function importAll(event, tabIdx) {
+  const file = event.target.files[0]; if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (data.tabs) {
+        // 完整配置导入
+        CONFIG = data;
+        init();
+      } else if (Array.isArray(data)) {
+        // 单tab数据导入
+        CONFIG.tabs[tabIdx].buildings = data;
+        renderMaps();
+      }
+      autoSave();
+      alert('导入成功！');
+    } catch(err) { alert('导入失败：' + err.message); }
+  };
+  reader.readAsText(file);
+  event.target.value = '';
+}
+
+function resetTab(i) {
+  if (!confirm('重置 "' + CONFIG.tabs[i].name + '" 地图？')) return;
+  CONFIG.tabs[i].buildings = [];
+  localStorage.removeItem(CONFIG.projectKey);
+  renderMaps(); updateCount();
+}
+
+// ===== 外部API（供角色扮演流程调用）=====
+// 添加新地点
+window.addLocation = function(tabIdx, loc) {
+  const map = document.getElementById('map-' + tabIdx);
+  if (!map) return;
+  loc.id = loc.id || 'b-' + (idCounter++);
+  loc.discovered = loc.discovered !== false;
+  const el = createBuildingEl(loc);
+  map.appendChild(el);
+  autoSave(); updateCount();
+};
+
+// 发现地点（去掉迷雾）
+window.discoverLocation = function(id) {
+  const el = document.querySelector(`[data-id="${id}"]`);
+  if (el) { el.classList.remove('undiscovered'); el.dataset.discovered = 'true'; autoSave(); updateCount(); }
+};
+
+// 导入完整配置
+window.loadConfig = function(config) {
+  CONFIG = config;
+  init();
+};
+
+// ===== 启动 =====
+init();
+</script>
+</body>
+</html>
